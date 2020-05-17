@@ -13,7 +13,7 @@ import struct
 
 class Receiver(object):
 
-    def __init__(self, inbound_port=50005, outbound_port=50006, timeout=10, debug_level=logging.INFO):
+    def __init__(self, inbound_port=50005, outbound_port=50006, timeout=1, debug_level=logging.INFO):
         self.logger = utils.Logger(self.__class__.__name__, debug_level)
 
         self.inbound_port = inbound_port
@@ -27,10 +27,10 @@ class Receiver(object):
         return hashlib.md5(data).hexdigest().encode('ascii') # 32 bytes
 
     def decode(self, data):
-        return data[:-34], int(binascii.hexlify(data[-34:-33]),16), data[-32:].decode('ascii')
+        return data[:-36], int(binascii.hexlify(data[-36:-32]),16), data[-32:].decode('ascii')
 
     def make_receiver_packet(self, ack):
-        data = bytearray(struct.pack('h', ack))
+        data = bytearray(struct.pack('>i', ack))
         data.extend(self.checksum(data))
         return data
 
@@ -42,23 +42,28 @@ class Receiver(object):
         most_recent_ack = 0
         receiver_ack = 0
         received_data = {}
-        CHUNK_SIZE = 990
+        CHUNK_SIZE = 988
         finished = False
         while True:
             try:
-                data = self.simulator.u_receive()  # receive data
-                # kind of an abuse of the simulation but hehe 
+                 # receive data
+                data = self.simulator.u_receive() 
+                # ending condition, kind of an abuse of the simulation but hehe 
                 if len(data) == 34:
                     self.logger.info("in end cond")
                     to_print = bytearray((most_recent_ack - init_sender_ack)*CHUNK_SIZE)
                     for index, value in received_data.items():
-                        to_print[(index-init_sender_ack)*CHUNK_SIZE: (index-init_sender_ack+1)*CHUNK_SIZE] = value
+                        to_print[(index-init_sender_ack)*CHUNK_SIZE: (index-init_sender_ack+1)*CHUNK_SIZE if (index-init_sender_ack+1)*CHUNK_SIZE < len(to_print) else None] = value
                     
+                    self.simulator.u_send(bytearray(34))
+                    self.simulator.u_send(bytearray(34))
                     self.simulator.u_send(bytearray(34))
                     sys.stdout.write(to_print.decode('ascii'))
                     self.logger.info("Finished")
                     sys.exit()
                     return
+                
+                # received a data packet so decode and then process
                 try:
                     data_chunk, ack, checksum = self.decode(data)
                     if self.checksum(data[:-32]) == checksum:  
@@ -68,13 +73,10 @@ class Receiver(object):
                         if ack > most_recent_ack:
                             most_recent_ack = ack
                         received_data.update({ack: data_chunk})
-                        self.simulator.u_send(self.make_receiver_packet(ack))
-                        self.logger.info("Got data from socket: {}".format(data_chunk.decode('ascii')))  # note that ASCII will only decode bytes in the range 0-127
-                
+                        self.simulator.u_send(self.make_receiver_packet(ack))                
                 except:
                     pass
                 #sys.exit()
-                #self.simulator.u_send(BogoReceiver.ACK_DATA)  # send ACK
             except socket.timeout:
                 sys.exit()
 

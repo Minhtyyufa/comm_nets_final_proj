@@ -12,10 +12,10 @@ import binascii
 import Queue
 import threading
 
-
-CHUNK_SIZE = 990
-NUM_SENDERS = 24
-
+# size of data chunks to send per packet
+CHUNK_SIZE = 988
+# number of threads, just increase to increase speed but queueing becomes more of an issue
+NUM_SENDERS = 256
 
 
 class Sender(object):
@@ -27,7 +27,7 @@ class Sender(object):
         def run(self):
             self.sender.thread_action(self.data)
 
-    def __init__(self, inbound_port=50006, outbound_port=50005, timeout=2, debug_level=logging.INFO):
+    def __init__(self, inbound_port=50006, outbound_port=50005, timeout=1, debug_level=logging.INFO):
         self.logger = utils.Logger(self.__class__.__name__, debug_level)
 
         self.inbound_port = inbound_port
@@ -46,32 +46,37 @@ class Sender(object):
 
     def checksum(self, data): 
         return hashlib.md5(data).hexdigest().encode('ascii') # 32 bytes
+
+    # to decode our packet structure
     def decode(self, data):
-        return int(binascii.hexlify(data[-34:-33]),16), data[-32:]
+        return int(binascii.hexlify(data[-36:-32]),16), data[-32:]
     
-    #ack can be identified by starting index
+    # send a packet
+    # ack can be identified by starting index
     def send_data(self, data_chunk, ack):
         packet_sent = False 
-        self.logger.info("sending: " +data_chunk.decode('ascii'))
-        data_chunk.extend(struct.pack('h', ack))
+        # create packet
+        data_chunk.extend(struct.pack('>i', ack))
         data_chunk.extend(self.checksum(data_chunk))
-    
+
         while not packet_sent:
             try: 
                 self.simulator.u_send(data_chunk)
                 ack_back, checksum = self.decode(self.simulator.u_receive())
-                print("my ack {}, ack_back: {}".format(str(ack), str(ack_back)))
-                if self.checksum(struct.pack('h',ack_back)) == checksum:
+                if self.checksum(struct.pack('>i',ack_back)) == checksum:
                     self.received_acks.update({ack_back: True})
                 
                 if (self.received_acks.has_key(ack)):
                     packet_sent = True
-
-            except socket.timeout:
+            except:
+                #socket timeouts, corrupted ack_backs, and also there is an error with multithreaded queueing in channelsimulator but cant handle so catch exception here
                 pass
+
+    # determine data portion to send 
     def thread_action(self, data):
         while not self.finished:
             index = 0
+            # get data index from thread safe queue
             self.queue_lock.acquire()
             if not self.index_queue.empty():
                 index = self.index_queue.get()
@@ -81,33 +86,34 @@ class Sender(object):
 
     def send(self, data):
         # [data_chunk ack checksum] packet organization
-
         self.logger.info("Sending on port: {} and waiting for ACK on port: {}".format(self.outbound_port, self.inbound_port))
+        
+        # indices to split data into chunks so the whole packet is 1024, (gets chunked to 1024 in channel simulator)
         split_indices = range(len(data)/CHUNK_SIZE + 1)
-        init_receiver_ack = 0
-        init_sender_ack = 123
 
-
+        # put indices in a queue that threads pull from
         for index in split_indices:
             self.index_queue.put(index)
-        
-        # terminator
-        # self.simulator.u_send(bytearray(34))
+
+        # create threads and send data
         for i in range(NUM_SENDERS):
             thread = Sender.ThreadObject(self, data)
             thread.start()
             self.threads.append(thread)
-
+        
+        # wait until no packets left to send
         while not self.index_queue.empty():
             pass
         
-        
+        # initiate ending
         self.finished = True
         for t in self.threads:
             t.join()
+
         packet_sent = False
         while not packet_sent:
             try: 
+                # the terminating packet is just a packet with no data, kind of abusing the channel simulator because then we dont have to worry about data corruption
                 self.simulator.u_send(bytearray(34))
                 self.simulator.u_send(bytearray(34))
                 self.simulator.u_send(bytearray(34))
